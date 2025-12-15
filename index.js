@@ -41,15 +41,20 @@ async function loadCookies() {
   }
 }
 
-// ================= login =================
+// ================= login (FIXED) =================
 async function ensureLoggedIn(page) {
   const cookies = await loadCookies();
 
-  // محاولة دخول بالكويكز
+  // محاولة الدخول بالكويكز
   if (cookies?.length) {
     await page.setCookie(...cookies);
     await page.goto(`${SITE_URL}/wp-admin/`, { waitUntil: 'networkidle2' });
-    if (await page.$('#wpadminbar')) return;
+
+    const ok =
+      (await page.$('#wpadminbar')) ||
+      (await page.$('body.wp-admin'));
+
+    if (ok) return;
   }
 
   // تسجيل دخول جديد
@@ -69,8 +74,21 @@ async function ensureLoggedIn(page) {
     page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 60000 })
   ]);
 
-  // تحقق الدخول
-  await page.waitForSelector('#wpadminbar', { timeout: 60000 });
+  // ===== تحقق ذكي =====
+  const loginError = await page.$('#login_error');
+  if (loginError) {
+    const msg = await page.$eval('#login_error', el => el.innerText);
+    throw new Error('Login failed: ' + msg);
+  }
+
+  const loggedIn =
+    (await page.$('#wpadminbar')) ||
+    (await page.$('body.wp-admin')) ||
+    page.url().includes('/wp-admin');
+
+  if (!loggedIn) {
+    throw new Error('Login failed: dashboard not detected');
+  }
 
   await saveCookies(await page.cookies());
 }
@@ -81,7 +99,6 @@ app.post('/publish', upload.single('image'), async (req, res) => {
   const imageFile = req.file;
 
   try {
-    // auth
     const auth = req.headers.authorization || '';
     if (!auth.startsWith('Bearer ') || auth.split(' ')[1] !== API_SECRET) {
       return res.status(401).json({ ok: false, error: 'Unauthorized' });
@@ -105,21 +122,21 @@ app.post('/publish', upload.single('image'), async (req, res) => {
       timeout: 60000
     });
 
-    // انتظار TinyMCE
+    // TinyMCE
     await page.waitForFunction(() => window.tinymce && tinymce.activeEditor);
 
-    // ===== العنوان =====
+    // العنوان
     await page.waitForSelector('#title', { visible: true });
     await page.type('#title', title, { delay: 20 });
 
-    // ===== المحتوى =====
+    // المحتوى
     const frameEl = await page.waitForSelector('#content_ifr', { visible: true });
     const frame = await frameEl.contentFrame();
     await frame.waitForSelector('body', { visible: true });
     await frame.focus('body');
     await frame.type('body', content, { delay: 5 });
 
-    // ===== التصنيف =====
+    // التصنيف
     if (category) {
       const catSel = `input[name="post_category[]"][value="${category}"]`;
       await page.waitForSelector(catSel, { visible: true });
@@ -127,7 +144,7 @@ app.post('/publish', upload.single('image'), async (req, res) => {
       if (!checked) await page.click(catSel);
     }
 
-    // ===== الصورة البارزة =====
+    // الصورة البارزة
     if (!imageFile) {
       return res.status(400).json({ ok: false, error: 'Image is required' });
     }
@@ -141,15 +158,12 @@ app.post('/publish', upload.single('image'), async (req, res) => {
     const fileInput = await page.$('.media-modal input[type="file"]');
     await fileInput.uploadFile(imageFile.path);
 
-    await page.waitForSelector('.media-button-select', {
-      visible: true,
-      timeout: 60000
-    });
+    await page.waitForSelector('.media-button-select', { visible: true, timeout: 60000 });
     await page.click('.media-button-select');
 
     await page.waitForTimeout(3000);
 
-    // ===== نشر =====
+    // نشر
     await page.waitForSelector('#publish:not([disabled])', { visible: true });
 
     await page.evaluate(() => {
@@ -168,7 +182,7 @@ app.post('/publish', upload.single('image'), async (req, res) => {
     return res.json({ ok: true, message: 'تم نشر المقال بنجاح' });
 
   } catch (err) {
-    console.error('❌ publish error:', err);
+    console.error('❌ ERROR:', err.message);
     return res.status(500).json({ ok: false, error: err.message });
   } finally {
     if (browser) await browser.disconnect().catch(() => {});
@@ -182,3 +196,4 @@ app.get('/', (req, res) => res.send('wp-publisher up'));
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });
+
