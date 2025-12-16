@@ -2,10 +2,9 @@ require('dotenv').config();
 const express = require('express');
 const bodyParser = require('body-parser');
 const puppeteer = require('puppeteer-core');
-const fs = require('fs').promises;
-const fsSync = require('fs');
-const path = require('path');
 const multer = require('multer');
+const fs = require('fs').promises;
+const path = require('path');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -14,178 +13,138 @@ app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
 
 const {
-  BROWSERLESS_WS,
   SITE_URL,
+  BROWSERLESS_WS,
   ADMIN_EMAIL,
   ADMIN_PASS,
   API_SECRET
 } = process.env;
 
-// ================= uploads =================
+// uploads (مؤقت)
 const UPLOAD_DIR = path.join(__dirname, 'uploads');
-if (!fsSync.existsSync(UPLOAD_DIR)) fsSync.mkdirSync(UPLOAD_DIR);
+require('fs').existsSync(UPLOAD_DIR) || require('fs').mkdirSync(UPLOAD_DIR);
 const upload = multer({ dest: UPLOAD_DIR });
 
-// ================= cookies =================
-const COOKIES_FILE = path.join(__dirname, 'cookies.json');
-
-async function saveCookies(cookies) {
-  await fs.writeFile(COOKIES_FILE, JSON.stringify(cookies), 'utf8');
-}
-
-async function loadCookies() {
-  try {
-    return JSON.parse(await fs.readFile(COOKIES_FILE, 'utf8'));
-  } catch {
-    return null;
-  }
-}
-
-// ================= login =================
+/* ================= LOGIN ================= */
 async function ensureLoggedIn(page) {
-  try {
-    const cookies = await loadCookies();
+  console.log('🔐 Opening login page');
 
-    // تجربة الدخول بالكويكز
-    if (cookies?.length) {
-      await page.setCookie(...cookies);
-      await page.goto(`${SITE_URL}/wp-admin/`, { waitUntil: 'networkidle2', timeout: 120000 });
+  await page.goto(`${SITE_URL}/wp-login.php`, {
+    waitUntil: 'domcontentloaded',
+    timeout: 120000
+  });
 
-      const ok = (await page.$('#wpadminbar')) || (await page.$('body.wp-admin'));
-      if (ok) return;
-    }
+  await page.waitForSelector('#user_login', { visible: true, timeout: 60000 });
+  await page.type('#user_login', ADMIN_EMAIL, { delay: 30 });
 
-    // تسجيل دخول جديد
-    await page.goto(`${SITE_URL}/wp-login.php`, { waitUntil: 'networkidle2', timeout: 120000 });
+  await page.waitForSelector('#user_pass', { visible: true, timeout: 60000 });
+  await page.type('#user_pass', ADMIN_PASS, { delay: 30 });
 
-    await page.waitForSelector('#user_login', { visible: true, timeout: 120000 });
-    await page.type('#user_login', ADMIN_EMAIL, { delay: 20 });
+  await Promise.all([
+    page.click('#wp-submit'),
+    page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 120000 })
+  ]);
 
-    await page.waitForSelector('#user_pass', { visible: true, timeout: 120000 });
-    await page.type('#user_pass', ADMIN_PASS, { delay: 20 });
-
-    await Promise.all([
-      page.click('#wp-submit'),
-      page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 120000 })
-    ]);
-
-    // التحقق من الأخطاء
-    const loginError = await page.$('#login_error');
-    if (loginError) {
+  const loggedIn = await page.$('#wpadminbar');
+  if (!loggedIn) {
+    const error = await page.$('#login_error');
+    if (error) {
       const msg = await page.$eval('#login_error', el => el.innerText);
-      await page.screenshot({ path: 'login-error.png' });
-      throw new Error('Login failed: ' + msg);
+      throw new Error(`Login failed: ${msg}`);
     }
-
-    const loggedIn = (await page.$('#wpadminbar')) || (await page.$('body.wp-admin')) || page.url().includes('/wp-admin');
-    if (!loggedIn) {
-      await page.screenshot({ path: 'login-failed.png' });
-      throw new Error('Login failed: dashboard not detected');
-    }
-
-    await saveCookies(await page.cookies());
-
-  } catch (err) {
-    console.error('❌ ensureLoggedIn error:', err.message);
-    throw err;
+    throw new Error('Login failed: wpadminbar not found');
   }
+
+  console.log('✅ Logged in successfully');
 }
 
-// ================= publish =================
+/* ================= PUBLISH ================= */
 app.post('/publish', upload.single('image'), async (req, res) => {
   let browser;
-  const imageFile = req.file;
+  const image = req.file;
 
   try {
-    // التحقق من Authorization
+    // auth
     const auth = req.headers.authorization || '';
-    if (!auth.startsWith('Bearer ') || auth.split(' ')[1] !== API_SECRET) {
+    if (auth !== `Bearer ${API_SECRET}`) {
       return res.status(401).json({ ok: false, error: 'Unauthorized' });
     }
 
     const { title, content, category } = req.body;
-    if (!title || !content) {
-      return res.status(400).json({ ok: false, error: 'Missing title or content' });
+    if (!title || !content || !image) {
+      return res.status(400).json({ ok: false, error: 'Missing data' });
     }
 
-    // اتصال بالـ Browserless
     browser = await puppeteer.connect({
       browserWSEndpoint: BROWSERLESS_WS
     });
 
     const page = await browser.newPage();
+    page.setDefaultTimeout(180000);
+
     await ensureLoggedIn(page);
 
-    // صفحة إضافة مقال
+    console.log('📝 Opening new post page');
     await page.goto(`${SITE_URL}/wp-admin/post-new.php`, {
       waitUntil: 'networkidle2',
       timeout: 120000
     });
 
-    // انتظار TinyMCE
-    await page.waitForFunction(() => window.tinymce && tinymce.activeEditor, { timeout: 120000 });
-
-    // ===== العنوان =====
+    // title
     await page.waitForSelector('#title', { visible: true });
     await page.type('#title', title, { delay: 20 });
 
-    // ===== المحتوى =====
-    const frameEl = await page.waitForSelector('#content_ifr', { visible: true });
-    const frame = await frameEl.contentFrame();
-    await frame.waitForSelector('body', { visible: true });
-    await frame.focus('body');
-    await frame.type('body', content, { delay: 5 });
+    // TinyMCE content (آمن وسريع)
+    console.log('✍️ Writing content');
+    const frameHandle = await page.waitForSelector('#content_ifr', { timeout: 60000 });
+    const frame = await frameHandle.contentFrame();
 
-    // ===== التصنيف =====
+    await frame.evaluate((html) => {
+      document.body.innerHTML = html;
+    }, content);
+
+    // category
     if (category) {
-      const catSel = `input[name="post_category[]"][value="${category}"]`;
-      await page.waitForSelector(catSel, { visible: true });
-      const checked = await page.$eval(catSel, el => el.checked);
-      if (!checked) await page.click(catSel);
+      console.log('🏷 Selecting category');
+      await page.click(`#in-category-${category}`);
     }
 
-    // ===== الصورة البارزة =====
-    if (!imageFile) return res.status(400).json({ ok: false, error: 'Image is required' });
-
+    // featured image
+    console.log('🖼 Uploading image');
     await page.click('#set-post-thumbnail');
-    await page.waitForSelector('.media-modal', { visible: true });
-    await page.click('#menu-item-upload');
-    await page.waitForSelector('.media-modal input[type="file"]', { visible: true });
+    await page.waitForSelector('input[type="file"]', { visible: true });
 
-    const fileInput = await page.$('.media-modal input[type="file"]');
-    await fileInput.uploadFile(imageFile.path);
+    const fileInput = await page.$('input[type="file"]');
+    await fileInput.uploadFile(image.path);
 
     await page.waitForSelector('.media-button-select', { visible: true, timeout: 60000 });
     await page.click('.media-button-select');
 
     await page.waitForTimeout(3000);
 
-    // ===== نشر =====
-    await page.waitForSelector('#publish:not([disabled])', { visible: true });
-    await page.evaluate(() => {
-      document.querySelector('#publish').scrollIntoView({ behavior: 'instant', block: 'center' });
-    });
+    // publish
+    console.log('🚀 Publishing');
     await page.click('#publish');
 
-    await page.waitForSelector('#message.updated, #message.notice-success', { timeout: 60000 });
+    await page.waitForFunction(
+      () => document.body.innerText.includes('تم') || document.body.innerText.includes('Published'),
+      { timeout: 120000 }
+    );
 
     return res.json({ ok: true, message: 'تم نشر المقال بنجاح' });
 
   } catch (err) {
-    console.error('❌ publish error:', err.message);
-    if (browser) {
-      await page.screenshot({ path: 'publish-error.png' }).catch(() => {});
-    }
+    console.error('❌ publish error:', err);
     return res.status(500).json({ ok: false, error: err.message });
   } finally {
     if (browser) await browser.disconnect().catch(() => {});
-    if (imageFile) await fs.unlink(imageFile.path).catch(() => {});
+    if (image) await fs.unlink(image.path).catch(() => {});
   }
 });
 
-// ================= health =================
-app.get('/', (req, res) => res.send('wp-publisher up'));
+/* ================= HEALTH ================= */
+app.get('/', (_, res) => res.send('WP publisher running'));
 
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
-
-
+app.listen(PORT, () => {
+  console.log(`🚀 Server running on port ${PORT}`);
+});
