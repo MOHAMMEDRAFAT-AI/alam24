@@ -131,21 +131,43 @@ app.post('/publish', upload.single('image'), async (req, res) => {
     console.log('🖼 Uploading featured image');
     await page.click('#set-post-thumbnail');
 
-    await page.waitForSelector('input[type="file"]', {
-      visible: true,
-      timeout: 60000
-    });
+    
+// انتظر فتح media modal نفسه
+await page.waitForSelector('.media-modal', { timeout: 60000 });
 
-    const fileInput = await page.$('input[type="file"]');
-    await fileInput.uploadFile(image.path);
+// حاول تفتح تبويب "رفع ملفات" لو موجود
+await page.evaluate(() => {
+  const buttons = document.querySelectorAll('.media-router button');
+  if (!buttons.length) return;
 
-    await page.waitForSelector('.media-button-select', {
-      visible: true,
-      timeout: 60000
-    });
+  const uploadTab = [...buttons].find(btn =>
+    btn.innerText.includes('رفع') || btn.innerText.includes('Upload')
+  );
 
-    await page.click('.media-button-select');
-    await page.waitForTimeout(3000);
+  if (uploadTab) uploadTab.click();
+});
+
+// انتظر input رفع الملف الحقيقي
+await page.waitForSelector('input[type="file"]', {
+  visible: true,
+  timeout: 60000
+});
+
+// ارفع الصورة
+const fileInput = await page.$('input[type="file"]');
+await fileInput.uploadFile(image.path);
+
+// انتظر زر "تعيين صورة بارزة / Set featured image"
+await page.waitForSelector('.media-button-select', {
+  visible: true,
+  timeout: 60000
+});
+
+// اضغطه
+await page.click('.media-button-select');
+
+// مهلة صغيرة للاستقرار
+await page.waitForTimeout(3000);
 
     /* ---------- PUBLISH ---------- */
     console.log('🚀 Publishing post');
@@ -175,3 +197,4 @@ app.get('/', (_, res) => res.send('WP publisher running'));
 app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
 });
+
