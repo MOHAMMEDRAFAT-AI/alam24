@@ -167,8 +167,10 @@ await page.waitForSelector('.media-button-select', {
 await page.click('.media-button-select');
 
 // مهلة صغيرة للاستقرار
-await page.waitForTimeout(3000);
 
+await page.click('.media-button-select');
+await new Promise(resolve => setTimeout(resolve, 3000));
+    
     /* ---------- PUBLISH ---------- */
     console.log('🚀 Publishing post');
     await page.click('#publish');
@@ -197,4 +199,5 @@ app.get('/', (_, res) => res.send('WP publisher running'));
 app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
 });
+
 
