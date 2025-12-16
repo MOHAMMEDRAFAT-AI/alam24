@@ -4,6 +4,7 @@ const bodyParser = require('body-parser');
 const puppeteer = require('puppeteer-core');
 const multer = require('multer');
 const fs = require('fs').promises;
+const fsSync = require('fs');
 const path = require('path');
 
 const app = express();
@@ -20,9 +21,9 @@ const {
   API_SECRET
 } = process.env;
 
-// uploads (مؤقت)
+/* ================= UPLOAD ================= */
 const UPLOAD_DIR = path.join(__dirname, 'uploads');
-require('fs').existsSync(UPLOAD_DIR) || require('fs').mkdirSync(UPLOAD_DIR);
+if (!fsSync.existsSync(UPLOAD_DIR)) fsSync.mkdirSync(UPLOAD_DIR);
 const upload = multer({ dest: UPLOAD_DIR });
 
 /* ================= LOGIN ================= */
@@ -35,10 +36,10 @@ async function ensureLoggedIn(page) {
   });
 
   await page.waitForSelector('#user_login', { visible: true, timeout: 60000 });
-  await page.type('#user_login', ADMIN_EMAIL, { delay: 30 });
+  await page.type('#user_login', ADMIN_EMAIL, { delay: 25 });
 
   await page.waitForSelector('#user_pass', { visible: true, timeout: 60000 });
-  await page.type('#user_pass', ADMIN_PASS, { delay: 30 });
+  await page.type('#user_pass', ADMIN_PASS, { delay: 25 });
 
   await Promise.all([
     page.click('#wp-submit'),
@@ -55,7 +56,7 @@ async function ensureLoggedIn(page) {
     throw new Error('Login failed: wpadminbar not found');
   }
 
-  console.log('✅ Logged in successfully');
+  console.log('✅ Logged in');
 }
 
 /* ================= PUBLISH ================= */
@@ -64,7 +65,7 @@ app.post('/publish', upload.single('image'), async (req, res) => {
   const image = req.file;
 
   try {
-    // auth
+    /* ---------- AUTH ---------- */
     const auth = req.headers.authorization || '';
     if (auth !== `Bearer ${API_SECRET}`) {
       return res.status(401).json({ ok: false, error: 'Unauthorized' });
@@ -75,6 +76,7 @@ app.post('/publish', upload.single('image'), async (req, res) => {
       return res.status(400).json({ ok: false, error: 'Missing data' });
     }
 
+    /* ---------- BROWSER ---------- */
     browser = await puppeteer.connect({
       browserWSEndpoint: BROWSERLESS_WS
     });
@@ -84,17 +86,18 @@ app.post('/publish', upload.single('image'), async (req, res) => {
 
     await ensureLoggedIn(page);
 
-    console.log('📝 Opening new post page');
+    /* ---------- OPEN POST ---------- */
+    console.log('📝 Opening new post');
     await page.goto(`${SITE_URL}/wp-admin/post-new.php`, {
       waitUntil: 'networkidle2',
       timeout: 120000
     });
 
-    // title
+    /* ---------- TITLE ---------- */
     await page.waitForSelector('#title', { visible: true });
     await page.type('#title', title, { delay: 20 });
 
-    // TinyMCE content (آمن وسريع)
+    /* ---------- CONTENT (TinyMCE SAFE) ---------- */
     console.log('✍️ Writing content');
     const frameHandle = await page.waitForSelector('#content_ifr', { timeout: 60000 });
     const frame = await frameHandle.contentFrame();
@@ -103,31 +106,55 @@ app.post('/publish', upload.single('image'), async (req, res) => {
       document.body.innerHTML = html;
     }, content);
 
-    // category
+    /* ---------- CATEGORY ---------- */
     if (category) {
-      console.log('🏷 Selecting category');
-      await page.click(`#in-category-${category}`);
+      console.log('🏷 Selecting category:', category);
+
+      // افتح صندوق التصنيفات لو مسكّر
+      await page.evaluate(() => {
+        const box = document.querySelector('#categorydiv');
+        if (box && box.classList.contains('closed')) {
+          box.querySelector('.handlediv')?.click();
+        }
+      });
+
+      const checkbox = `input[name="post_category[]"][value="${category}"]`;
+      await page.waitForSelector(checkbox, { visible: true, timeout: 60000 });
+
+      const checked = await page.$eval(checkbox, el => el.checked);
+      if (!checked) {
+        await page.click(checkbox);
+      }
     }
 
-    // featured image
-    console.log('🖼 Uploading image');
+    /* ---------- FEATURED IMAGE ---------- */
+    console.log('🖼 Uploading featured image');
     await page.click('#set-post-thumbnail');
-    await page.waitForSelector('input[type="file"]', { visible: true });
+
+    await page.waitForSelector('input[type="file"]', {
+      visible: true,
+      timeout: 60000
+    });
 
     const fileInput = await page.$('input[type="file"]');
     await fileInput.uploadFile(image.path);
 
-    await page.waitForSelector('.media-button-select', { visible: true, timeout: 60000 });
-    await page.click('.media-button-select');
+    await page.waitForSelector('.media-button-select', {
+      visible: true,
+      timeout: 60000
+    });
 
+    await page.click('.media-button-select');
     await page.waitForTimeout(3000);
 
-    // publish
-    console.log('🚀 Publishing');
+    /* ---------- PUBLISH ---------- */
+    console.log('🚀 Publishing post');
     await page.click('#publish');
 
     await page.waitForFunction(
-      () => document.body.innerText.includes('تم') || document.body.innerText.includes('Published'),
+      () =>
+        document.body.innerText.includes('تم') ||
+        document.body.innerText.includes('Published'),
       { timeout: 120000 }
     );
 
